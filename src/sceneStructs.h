@@ -6,6 +6,7 @@
 
 #include <string>
 #include <vector>
+#include "generated/metal_presets.h"
 
 #define BACKGROUND_COLOR (glm::vec3(0.0f))
 
@@ -35,16 +36,57 @@ struct Geom
 
 struct Material
 {
-    glm::vec3 color;
-    struct
-    {
-        float exponent;
+    struct Base {
+        float weight;
         glm::vec3 color;
+        float diffRoughness;
+    } base;
+
+    struct Emission {
+        float emittance;
+    } emission;
+
+    struct Specular {
+        // a non-zero weight implies reflectiveness
+        float weight;
+        float roughness;
+        float indexOfRefraction;
     } specular;
-    float hasReflective;
-    float hasRefractive;
-    float indexOfRefraction;
-    float emittance;
+
+    struct Metallic {
+        float weight;
+        int metallicPresetID; // 0 = Gold, 
+                              // 1 = Silver, 
+                              // 2 = Copper, 
+                              // 3 = Brushed Metal, 
+                              // 4 = Chrome
+                              
+        // user-hidden derived values
+        glm::vec3 etaT; // Real part of the metal's IOR
+        glm::vec3 k;   // Imaginary part; nonnegative, can exceed 1
+
+        void setComplexIOR(int metallicPresetID)
+        {
+            switch (metallicPresetID)
+            {
+            case 0:
+                // set etaT & k for Gold
+                break;
+            case 1:
+                // set etaT & k for Silver
+                break;
+            case 2:
+                // set etaT & k for Copper
+                break;
+            case 3:
+                // set etaT & k for Brushed Metal
+                break;
+            case 4:
+                // set etaT & k for Chrome
+                break;
+            }
+        }
+    } metallic;
 };
 
 struct Camera
