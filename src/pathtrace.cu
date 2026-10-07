@@ -4,6 +4,8 @@
 #include <cuda.h>
 #include <cmath>
 #include <cfloat>
+#include <algorithm>
+#include <stdexcept>
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 #include <thrust/partition.h>
@@ -24,8 +26,9 @@
 void checkCUDAErrorFn(const char* msg, const char* file, int line)
 {
 #if ERRORCHECK
-    cudaDeviceSynchronize();
-    cudaError_t err = cudaGetLastError();
+    const cudaError_t syncError = cudaDeviceSynchronize();
+    const cudaError_t launchError = cudaGetLastError();
+    const cudaError_t err = syncError != cudaSuccess ? syncError : launchError;
     if (cudaSuccess == err)
     {
         return;
@@ -42,6 +45,13 @@ void checkCUDAErrorFn(const char* msg, const char* file, int line)
 #endif // _WIN32
     exit(EXIT_FAILURE);
 #endif // ERRORCHECK
+}
+
+static void requireCuda(cudaError_t error, const char* operation)
+{
+    if (error != cudaSuccess) {
+        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(error));
+    }
 }
 
 struct IsActive {
@@ -78,12 +88,13 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm
     if (x < resolution.x && y < resolution.y)
     {
         int index = x + (y * resolution.x);
-        glm::vec3 pix = image[index];
+        glm::vec3 pix = iter > 0 ? image[index] : glm::vec3(0.0f);
+        const int samples = iter > 0 ? iter : 1;
 
         glm::ivec3 color;
-        color.x = glm::clamp((int)(pix.x / iter * 255.0), 0, 255);
-        color.y = glm::clamp((int)(pix.y / iter * 255.0), 0, 255);
-        color.z = glm::clamp((int)(pix.z / iter * 255.0), 0, 255);
+        color.x = glm::clamp((int)(pix.x / samples * 255.0), 0, 255);
+        color.y = glm::clamp((int)(pix.y / samples * 255.0), 0, 255);
+        color.z = glm::clamp((int)(pix.z / samples * 255.0), 0, 255);
 
         // Each thread writes one pixel location in the texture (textel)
         pbo[index].w = 0;
@@ -106,25 +117,41 @@ void InitDataContainer(GuiDataContainer* imGuiData)
     guiData = imGuiData;
 }
 
-void pathtraceInit(Scene* scene)
+void pathtraceInit(Scene* scene, bool restoreAccumulation)
 {
     hst_scene = scene;
 
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
 
-    cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3));
-    cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
+    if (scene->state.image.size() != static_cast<std::size_t>(pixelcount)) {
+        throw std::runtime_error("Host accumulation size does not match the camera");
+    }
+    requireCuda(cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3)), "allocate image");
+    if (restoreAccumulation) {
+        requireCuda(cudaMemcpy(dev_image, scene->state.image.data(),
+            pixelcount * sizeof(glm::vec3), cudaMemcpyHostToDevice), "restore image");
+    }
+    else {
+        std::fill(scene->state.image.begin(), scene->state.image.end(), glm::vec3(0.0f));
+        requireCuda(cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3)), "clear image");
+    }
 
-    cudaMalloc(&dev_paths, pixelcount * sizeof(PathSegment));
+    requireCuda(cudaMalloc(&dev_paths, pixelcount * sizeof(PathSegment)), "allocate paths");
 
-    cudaMalloc(&dev_geoms, scene->geoms.size() * sizeof(Geom));
-    cudaMemcpy(dev_geoms, scene->geoms.data(), scene->geoms.size() * sizeof(Geom), cudaMemcpyHostToDevice);
+    if (!scene->geoms.empty()) {
+        requireCuda(cudaMalloc(&dev_geoms, scene->geoms.size() * sizeof(Geom)), "allocate geometry");
+        requireCuda(cudaMemcpy(dev_geoms, scene->geoms.data(), scene->geoms.size() * sizeof(Geom),
+            cudaMemcpyHostToDevice), "upload geometry");
+    }
 
-    cudaMalloc(&dev_materials, scene->materials.size() * sizeof(Material));
-    cudaMemcpy(dev_materials, scene->materials.data(), scene->materials.size() * sizeof(Material), cudaMemcpyHostToDevice);
+    if (!scene->materials.empty()) {
+        requireCuda(cudaMalloc(&dev_materials, scene->materials.size() * sizeof(Material)), "allocate materials");
+        requireCuda(cudaMemcpy(dev_materials, scene->materials.data(), scene->materials.size() * sizeof(Material),
+            cudaMemcpyHostToDevice), "upload materials");
+    }
 
-    cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
+    requireCuda(cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection)), "allocate hits");
 
 
     checkCUDAError("pathtraceInit");
@@ -144,6 +171,15 @@ void pathtraceFree()
     dev_intersections = nullptr;
 
     checkCUDAError("pathtraceFree");
+}
+
+void pathtraceDisplay(uchar4* pbo, int completedSamples)
+{
+    const Camera& cam = hst_scene->state.camera;
+    const dim3 block(8, 8);
+    const dim3 grid((cam.resolution.x + 7) / 8, (cam.resolution.y + 7) / 8);
+    sendImageToPBO<<<grid, block>>>(pbo, cam.resolution, completedSamples, dev_image);
+    checkCUDAError("display restored image");
 }
 
 /**
@@ -237,7 +273,7 @@ __global__ void shadeMaterial(
         return;
     }
 
-    // Seed by ORIGINAL pixel identity, never the sorted/compacted array slot.
+   
     thrust::default_random_engine rng =
         makeSeededRandomEngine(iter, path.pixelIndex, path.remainingBounces);
     scatterRay(path, hit.position, hit.surfaceNormal, material, rng);
@@ -290,8 +326,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         ++depth;
 
         if (hst_scene->state.sortMaterials) {
-            // Sort hit keys AND corresponding paths together, only in the
-            // active prefix. Material-array indices remain unchanged.
+            // Sort hit keys and corresponding paths together, only in the
+            // active prefix. Material-array indices unchanged.
             thrust::sort_by_key(thrust::device,
                 dev_intersections, dev_intersections + num_paths,
                 dev_paths, CompareMaterial{});
@@ -301,9 +337,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             iter, num_paths, dev_intersections, dev_paths, dev_materials);
         checkCUDAError("shade one bounce");
 
-        // Partition preserves both groups. Finished contributions accumulate
-        // in the tail; previously finished paths beyond this prefix stay put.
-        // remove_if would NOT preserve that tail for the final full-array gather.
+        
+        // better than remove_if
         PathSegment* activeEnd = thrust::partition(thrust::device,
             dev_paths, dev_paths + num_paths, IsActive{});
         num_paths = static_cast<int>(activeEnd - dev_paths);
@@ -325,8 +360,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image);
 
     // Retrieve image from GPU
-    cudaMemcpy(hst_scene->state.image.data(), dev_image,
-        pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
+    requireCuda(cudaMemcpy(hst_scene->state.image.data(), dev_image,
+        pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost), "read completed image");
 
     checkCUDAError("pathtrace");
 }

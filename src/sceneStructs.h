@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "generated/metal_presets.h"
+#include "generated/transmission_presets.h"
 #include <algorithm>
 #include <cmath>
 
@@ -40,7 +41,8 @@ struct Geom
 enum class MaterialType : int
 {
     Standard,
-    Metal
+    Metal,
+    Transmission
 };
 
 struct Material
@@ -69,16 +71,16 @@ struct Material
     // Initialize even when the scene omits roughness.
     float alpha = roughnessToAlpha(roughness);
 
-    // CPU-side setter; r is validated by the scene parser.
+    // CPU-side setter; r is valdated by the scene parser.
     void setRoughness(float r)
     {
         roughness = r;
         alpha = roughnessToAlpha(r);
     }
 
-    // Standard materials only; exterior medium is air, IOR = 1.
+    // Standard materials only; air, IOR = 1.
     float ior = 1.5f;
-    float diffuseSigmaDegrees = 0.0f; // Oren-Nayar sigma: [0 (lambertian), 90].
+    float diffuseSigmaDegrees = 0.0f; // Oren-Nayar: 0 (lambertian), 90.
 
     // Nonzero emitted RGB means a terminal light.
     struct Emission {
@@ -87,7 +89,7 @@ struct Material
     } emission;
 
     struct Metal {
-        // -1 means unused/unselected, never a renderable metal preset.
+        // -1 means unused/unselected, not a renderable metal preset.
         int presetID = -1;
         glm::vec3 etaT = glm::vec3(1.0f);
         glm::vec3 k = glm::vec3(0.0f);
@@ -107,6 +109,22 @@ struct Material
             k = metalIORPresets[id].k;
         }
     } metal;
+
+    struct Transmission {
+        int presetID = -1; // Unselected, not a renderable transmission material.
+        float ior = 1.5f;
+
+        void setPreset(int id)
+        {
+            constexpr int count = static_cast<int>(
+                sizeof(transmissionIORPresets) / sizeof(transmissionIORPresets[0]));
+            if (id < 0 || id >= count) {
+                throw std::out_of_range("Invalid transmissionPresetID");
+            }
+            presetID = id;
+            ior = transmissionIORPresets[id].ior;
+        }
+    } transmission;
 };
 
 struct Camera

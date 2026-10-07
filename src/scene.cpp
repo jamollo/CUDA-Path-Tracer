@@ -20,7 +20,7 @@ using json = nlohmann::json;
 
 namespace {
 
-    // An absent object behaves like an empty object, so all defaults survive.
+    // An absent object behaves like an empty object, so all defaults remain.
     const json& optionalObject(const json& parent, const char* key)
     {
         static const json empty = json::object();
@@ -75,7 +75,7 @@ namespace {
             value.at(2).get<float>());
     }
 
-    // Accept either a grayscale scalar or a three-component RGB value.
+    // Accept either a grayscale scalar or a threee component RGB value.
     glm::vec3 readCoefficient(
         const json& object,
         const char* key,
@@ -106,6 +106,10 @@ namespace {
         Material result{};
         const std::string type =
             p.value("type", std::string("standard"));
+
+        if (type != "transmission" && p.contains("transmissionPresetID")) {
+            throw std::runtime_error("transmissionPresetID requires type = transmission");
+        }
 
         if (type == "standard") {
             if (p.contains("metalPresetID")) {
@@ -155,14 +159,38 @@ namespace {
 
             result.metal.setPreset(preset.get<int>());
         }
+        else if (type == "transmission") {
+            if (p.contains("Kd") || p.contains("Ks") || p.contains("ior") ||
+                p.contains("roughness") || p.contains("diffuseSigmaDegrees") ||
+                p.contains("metalPresetID")) {
+                throw std::runtime_error(
+                    "Transmission uses a smooth clear-glass preset; omit Kd, Ks, "
+                    "ior, roughness, diffuseSigmaDegrees, and metalPresetID");
+            }
+            if (!p.contains("transmissionPresetID")) {
+                throw std::runtime_error("Transmission materials require transmissionPresetID");
+            }
+            const auto& preset = p.at("transmissionPresetID");
+            constexpr int count = static_cast<int>(
+                sizeof(transmissionIORPresets) / sizeof(transmissionIORPresets[0]));
+            if (!preset.is_number_integer() || preset < 0 || preset >= count) {
+                throw std::runtime_error(
+                    "transmissionPresetID must be a valid nonnegative preset index");
+            }
+            result.type = MaterialType::Transmission;
+            result.Kd = glm::vec3(0.0f);
+            result.Ks = glm::vec3(0.0f);
+            result.transmission.setPreset(preset.get<int>());
+        }
         else {
             throw std::runtime_error("Unknown material type: " + type);
         }
 
-        result.Ks = readCoefficient(p, "Ks", result.Ks);
-
-        result.setRoughness(
-            readFloat(p, "roughness", result.roughness));
+        if (result.type != MaterialType::Transmission) {
+            result.Ks = readCoefficient(p, "Ks", result.Ks);
+            // Preserve  existing Standard/Metal mapping including zero.
+            result.setRoughness(readFloat(p, "roughness", result.roughness));
+        }
 
         const auto& emission = optionalObject(p, "emission");
 
@@ -203,6 +231,11 @@ void Scene::loadFromJSON(const std::string& jsonName)
         throw std::runtime_error("Could not open scene: " + jsonName);
     }
     const json data = json::parse(f);
+    json checkpointData = data;
+    checkpointData.at("Camera").erase("ITERATIONS");
+    checkpointData.at("Camera").erase("FILE");
+    checkpointData.erase("sortMaterials");
+    checkpointSceneIdentity = checkpointData.dump();
     const auto& materialsData = data.at("materials");
     if (!materialsData.is_array()) {
         throw std::runtime_error("materials must be an array");
@@ -261,6 +294,14 @@ void Scene::loadFromJSON(const std::string& jsonName)
     float fovy = cameraData["FOVY"];
     state.iterations = cameraData["ITERATIONS"];
     state.traceDepth = cameraData["DEPTH"];
+    // Counts and pixel indices currently pass through signed int CUDA APIs.
+    if (camera.resolution.x <= 0 || camera.resolution.y <= 0 ||
+        static_cast<long long>(camera.resolution.x) * camera.resolution.y >
+            std::numeric_limits<int>::max() / 4 ||
+        state.iterations == 0 || state.iterations > std::numeric_limits<int>::max() ||
+        state.traceDepth < 0) {
+        throw std::runtime_error("Invalid resolution, iteration target, or trace depth");
+    }
     state.imageName = cameraData["FILE"];
     const auto& pos = cameraData["EYE"];
     const auto& lookat = cameraData["LOOKAT"];

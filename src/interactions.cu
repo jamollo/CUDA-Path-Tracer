@@ -113,16 +113,16 @@ static __host__ __device__ glm::vec3 TrowbridgeReitzSample(
     float U1,
     float U2)
 {
-    // Stretch the direction.
+    // Stretch the direction..
     glm::vec3 woStretched = glm::normalize(
         glm::vec3(alpha * wo.x, alpha * wo.y, wo.z));
 
-    // Sample slopes using the reference-output version.
+    // Sample slopes using reference-output version.
     float slope_x, slope_y;
     TrowbridgeReitzSample11(
         woStretched.z, U1, U2, slope_x, slope_y);
 
-    // Compute the azimuth of the stretched direction.
+    // Compute azimuth of the stretched direction.
     float xyLength = sqrtf(
         woStretched.x * woStretched.x +
         woStretched.y * woStretched.y);
@@ -140,7 +140,7 @@ static __host__ __device__ glm::vec3 TrowbridgeReitzSample(
     slope_y = sinPhi * slope_x + cosPhi * slope_y;
     slope_x = tmp;
 
-    // Unstretch the slopes.
+    // Unstretch the slopes
     slope_x *= alpha;
     slope_y *= alpha;
 
@@ -155,7 +155,7 @@ static __host__ __device__ glm::vec3 sampleGGXVisibleNormal(
     float U1,
     float U2)
 {
-    // Protect the slope sampler from a rounded uniform value of exactly 1.
+    // Protect slope sampler from a rounded uniform value being == 1.
     U1 = fminf(fmaxf(U1, 0.0f), 0.99999994f);
     U2 = fminf(fmaxf(U2, 0.0f), 0.99999994f);
     bool flip = wo.z < 0.0f;
@@ -169,7 +169,7 @@ static __host__ __device__ glm::vec3 sampleGGXVisibleNormal(
 
 
 // Informed from PBRT microfacet.cpp:
-// Fresnel, Oren-Nayar, GGX reflection, visible-normal PDF, and BSDF mixture.
+// Fresnel, Oren-Nayar, GGX reflection, visible-normal PDF, and BSDF mix
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
@@ -182,7 +182,7 @@ __host__ __device__ bool hasPositive(const glm::vec3& v)
 
 __host__ __device__ bool finiteFloat(float x)
 {
-    return x >= -FLT_MAX && x <= FLT_MAX; // Also rejects NaN.
+    return x >= -FLT_MAX && x <= FLT_MAX; // Also rejects not number
 }
 
 __host__ __device__ bool finiteVector(const glm::vec3& v)
@@ -249,7 +249,7 @@ __host__ __device__ float fresnelDielectric(
 __host__ __device__ glm::vec3 fresnelConductor(
     float cosThetaI, const glm::vec3& eta, const glm::vec3& k)
 {
-    // eta and k are relative to exterior air (etaI = 1).
+    // eta and k are relative to  air thats etaI = 1
     cosThetaI = fminf(fabsf(cosThetaI), 1.0f);
     const float cos2 = cosThetaI * cosThetaI;
     const float sin2 = 1.0f - cos2;
@@ -297,7 +297,7 @@ __host__ __device__ float ggxG(
     const glm::vec3& wo, const glm::vec3& wi, float alpha)
 {
     if (wo.z <= 0.0f || wi.z <= 0.0f) return 0.0f;
-    // PBRT's correlated Smith masking-shadowing, not G1(wo) * G1(wi).
+    // PBRt Smith masking-shadowing, not G1(wo) * G1(wi).
     return 1.0f / (1.0f + ggxLambda(wo, alpha) + ggxLambda(wi, alpha));
 }
 
@@ -350,7 +350,7 @@ __host__ __device__ glm::vec3 evaluateGlossy(
     const Material& m, const glm::vec3& wo, const glm::vec3& wi, bool frontFace)
 {
     const glm::vec3 wh = glm::normalize(wo + wi);
-    // Both local directions are above the oriented reflection surface.
+    // Both local directions are above oriented reflection surface
     const float microfacetCos = glm::dot(wi, wh);
     const glm::vec3 F = m.type == MaterialType::Metal
         ? fresnelConductor(microfacetCos, m.metal.etaT, m.metal.k)
@@ -370,10 +370,43 @@ __host__ __device__ void absorb(PathSegment& path)
 
 namespace bsdf {
 
+__host__ __device__ Sample sampleSmoothDielectric(
+    const Material& m, const glm::vec3& wo, bool frontFace, float u)
+{
+    Sample result{};
+    if (!(wo.z > 0.0f) || !finiteVector(wo)) return result;
+
+    const float etaIncident = frontFace ? 1.0f : m.transmission.ior;
+    const float etaTransmitted = frontFace ? m.transmission.ior : 1.0f;
+    const float eta = etaIncident / etaTransmitted;
+    const float cosI = fminf(wo.z, 1.0f);
+    const float sinT = eta * sqrtf(fmaxf(0.0f, 1.0f - cosI * cosI));
+    const bool tir = sinT >= 1.0f;
+    // dielectric Fresnel used by Standard glossy reflection.
+    const float F = tir ? 1.0f : fresnelDielectric(cosI, etaIncident, etaTransmitted);
+    result.delta = true;
+    if (F >= 1.0f || u < F) {
+        result.wi = glm::vec3(-wo.x, -wo.y, wo.z);
+        result.branchProbability = F;
+        result.deltaWeight = glm::vec3(1.0f); // F / P(reflect) = 1
+    }
+    else {
+        const float cosT = sqrtf(fmaxf(0.0f, 1.0f - sinT * sinT));
+        result.wi = glm::vec3(-eta * wo.x, -eta * wo.y, -cosT);
+        result.transmission = true;
+        result.branchProbability = 1.0f - F;
+        // PBRT radiance transport: (1-F)/P(transmit) cancels, so just eta^2.
+        result.deltaWeight = glm::vec3(eta * eta);
+    }
+    result.wi = glm::normalize(result.wi);
+    return result;
+}
+
 __host__ __device__ glm::vec3 evaluate(
     const Material& m, const glm::vec3& wo, const glm::vec3& wi, bool frontFace)
 {
-    if (wo.z <= 0.0f || wi.z <= 0.0f) return glm::vec3(0.0f);
+    if (m.type == MaterialType::Transmission || wo.z <= 0.0f || wi.z <= 0.0f)
+        return glm::vec3(0.0f);
     glm::vec3 f(0.0f);
     if (m.type == MaterialType::Standard && hasPositive(m.Kd)) {
         f += evaluateDiffuse(m, wo, wi);
@@ -385,7 +418,8 @@ __host__ __device__ glm::vec3 evaluate(
 __host__ __device__ float pdf(
     const Material& m, const glm::vec3& wo, const glm::vec3& wi)
 {
-    if (wo.z <= 0.0f || wi.z <= 0.0f) return 0.0f;
+    if (m.type == MaterialType::Transmission || wo.z <= 0.0f || wi.z <= 0.0f)
+        return 0.0f;
     float qd, qs;
     componentProbabilities(m, qd, qs);
     const float pd = wi.z * kInvPi;
@@ -399,6 +433,10 @@ __host__ __device__ Sample sample(
 {
     Sample result{glm::vec3(0.0f), glm::vec3(0.0f), 0.0f};
     if (wo.z <= 0.0f) return result;
+    if (m.type == MaterialType::Transmission) {
+        thrust::uniform_real_distribution<float> u01(0.0f, 1.0f);
+        return sampleSmoothDielectric(m, wo, frontFace, u01(rng));
+    }
     float qd, qs;
     componentProbabilities(m, qd, qs);
     if (qd == 0.0f && qs == 0.0f) return result;
@@ -410,7 +448,7 @@ __host__ __device__ Sample sample(
             sampleCosineWeightedHemisphere(glm::vec3(0.0f, 0.0f, 1.0f), rng));
     }
     else {
-        // Separate statements make the RNG draw order unambiguous n C++.
+        // Separate statements make the RNG draw order not ambiguous n C++.
         const float u1 = u01(rng);
         const float u2 = u01(rng);
         const glm::vec3 wh = sampleGGXVisibleNormal(wo, m.alpha, u1, u2);
@@ -419,7 +457,7 @@ __host__ __device__ Sample sample(
         result.wi = glm::normalize(-wo + 2.0f * woDotWh * wh);
     }
 
-    // The rejected probability is part of  original sampler.
+    // rejected probability is part of  original sampler.
     // Dont not loop, resample, or renormalize the PDF over accepted directions.
     if (!(result.wi.z > 0.0f) || !finiteVector(result.wi)) return result;
     result.pdf = bsdf::pdf(m, wo, result.wi);
@@ -438,7 +476,7 @@ __host__ __device__ void scatterRay(
     const Material& m, thrust::default_random_engine& rng)
 {
     // The shading kernel has already checked for a terminal emissive hit.
-    // With one surface query left, reflection cannot reach another light.
+    // With one surface query left, scattering cannot reach another light.
     if (pathSegment.remainingBounces <= 1) {
         absorb(pathSegment);
         return;
@@ -447,23 +485,25 @@ __host__ __device__ void scatterRay(
     const glm::vec3 geometricNormal = glm::normalize(normal);
     const glm::vec3 woWorld = -glm::normalize(pathSegment.ray.direction);
     const bool frontFace = glm::dot(geometricNormal, woWorld) >= 0.0f;
-    const glm::vec3 reflectionNormal = frontFace ? geometricNormal : -geometricNormal;
-    const SurfaceFrame frame = makeFrame(reflectionNormal);
+    const glm::vec3 shadingNormal = frontFace ? geometricNormal : -geometricNormal;
+    const SurfaceFrame frame = makeFrame(shadingNormal);
     const glm::vec3 wo = glm::normalize(frame.toLocal(woWorld));
     const bsdf::Sample s = bsdf::sample(m, wo, frontFace, rng);
-    if (!(s.pdf > 0.0f)) {
+    if ((s.delta ? !(s.branchProbability > 0.0f) : !(s.pdf > 0.0f)) ||
+        !finiteVector(s.wi)) {
         absorb(pathSegment);
         return;
     }
 
-    pathSegment.color *= s.f * (s.wi.z / s.pdf);
+    pathSegment.color *= s.delta ? s.deltaWeight : s.f * (fabsf(s.wi.z) / s.pdf);
     if (!finiteVector(pathSegment.color) || !hasPositive(pathSegment.color)) {
         absorb(pathSegment);
         return;
     }
 
     const glm::vec3 wiWorld = glm::normalize(frame.toWorld(s.wi));
-    if (!(glm::dot(wiWorld, reflectionNormal) > 0.0f)) {
+    const float side = glm::dot(wiWorld, shadingNormal);
+    if (s.transmission ? !(side < 0.0f) : !(side > 0.0f)) {
         absorb(pathSegment);
         return;
     }
