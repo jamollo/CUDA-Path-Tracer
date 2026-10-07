@@ -1,48 +1,43 @@
 #pragma once
 
 #include "sceneStructs.h"
-
 #include <glm/glm.hpp>
-
 #include <thrust/random.h>
 
-// CHECKITOUT
-/**
- * Computes a cosine-weighted random direction in a hemisphere.
- * Used for diffuse lighting.
- */
-__host__ __device__ glm::vec3 calculateRandomDirectionInHemisphere(
-    glm::vec3 normal, 
+// Cosine-weighted sampling about a unit world-space normal.
+__host__ __device__ glm::vec3 sampleCosineWeightedHemisphere(
+    glm::vec3 normal, thrust::default_random_engine& rng);
+
+namespace bsdf {
+
+// Local convention: normal = +Z, both directions point away from the hit,
+// and reflection is supported only for wo.z > 0 and wi.z > 0.
+// frontFace records the ORIGINAL outward geometric normal's side; orienting
+// the reflection frame must not erase which dielectric medium is incident.
+struct Sample {
+    glm::vec3 wi;
+    glm::vec3 f; //  material BRDF, not just the sampled component.
+    float pdf;  //  mixture PDF, measured per unit solid angle.
+};
+
+__host__ __device__ glm::vec3 evaluate(
+    const Material& material, const glm::vec3& wo, const glm::vec3& wi,
+    bool frontFace);
+
+__host__ __device__ float pdf(
+    const Material& material, const glm::vec3& wo, const glm::vec3& wi);
+
+// pdf == 0 denotes a zero-contribution event. dont retry that sample.
+__host__ __device__ Sample sample(
+    const Material& material, const glm::vec3& wo, bool frontFace,
     thrust::default_random_engine& rng);
 
-/**
- * Scatter a ray with some probabilities according to the material properties.
- * For example, a diffuse surface scatters in a cosine-weighted hemisphere.
- * A perfect specular surface scatters in the reflected ray direction.
- * In order to apply multiple effects to one surface, probabilistically choose
- * between them.
- *
- * The visual effect you want is to straight-up add the diffuse and specular
- * components. You can do this in a few ways. This logic also applies to
- * combining other types of materias (such as refractive).
- *
- * - Always take an even (50/50) split between a each effect (a diffuse bounce
- *   and a specular bounce), but divide the resulting color of either branch
- *   by its probability (0.5), to counteract the chance (0.5) of the branch
- *   being taken.
- *   - This way is inefficient, but serves as a good starting point - it
- *     converges slowly, especially for pure-diffuse or pure-specular.
- * - Pick the split based on the intensity of each material color, and divide
- *   branch result by that branch's probability (whatever probability you use).
- *
- * This method applies its changes to the Ray parameter `ray` in place.
- * It also modifies the color `color` of the ray in place.
- *
- * You may need to change the parameter list for your purposes!
- */
+} // namespace bsdf
+
+// 'normal' is the outward geometric normal. Builds an oriented frame,
+// updates throughput with f * cos / pdf, and cretes one offset continuation.
+// An absorbing, invalid, or exhausted path is terminated with black color.
+// Emission is handled BEFORE calling this function, in shadeMaterial.
 __host__ __device__ void scatterRay(
-    PathSegment& pathSegment,
-    glm::vec3 intersect,
-    glm::vec3 normal,
-    const Material& m,
-    thrust::default_random_engine& rng);
+    PathSegment& pathSegment, glm::vec3 intersect, glm::vec3 normal,
+    const Material& material, thrust::default_random_engine& rng);
