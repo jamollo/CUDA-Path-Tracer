@@ -21,9 +21,13 @@ Native validation includes CUDA device checks and an exact comparison of uninter
 
 ## Materials
 
-![Matched Standard and glass comparisons](img/material_comparison_final.png)
+![Full room showing Standard, metal, and glass materials](img/room_open.png)
 
-The comparison uses one room and changes one material at a time: remove the Standard sphere's glossy lobe, set the matte cube's Oren–Nayar sigma to zero, or replace the glass sphere with an opaque diffuse material. Each pair uses identical geometry, lighting, camera, and display conversion at 768 × 768 and 1,024 samples per pixel. The comparison retains the original 1,024-sample baseline; the separately refined `room_open.png` uses 4,096 samples per pixel. Crops are projected from the actual checkpoint camera and object transforms.
+*Full room: 768 × 768, 4,096 samples per pixel, maximum path depth 8.*
+
+![Opaque diffuse reference and smooth glass comparison](img/glass_comparison.png)
+
+The glass comparison replaces the sphere's opaque diffuse reference material with smooth glass. Both crops use identical geometry, lighting, camera, and display conversion, from 768 × 768 renders at 1,024 samples per pixel. The full-room image above uses 4,096 samples per pixel.
 
 Standard materials add Lambert or Oren–Nayar diffuse reflection to dielectric GGX reflection. Cosine-weighted diffuse sampling and GGX visible-normal sampling use a full-material BRDF and matching mixture PDF. Kd and Ks are RGB coefficients, not sampling probabilities. The additive model does not enforce a combined energy-conservation constraint on their inputs.
 
