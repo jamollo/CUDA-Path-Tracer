@@ -190,7 +190,8 @@ void pathtraceDisplay(uchar4* pbo, int completedSamples)
 * motion blur - jitter rays "in time"
 * lens effect - jitter ray origin positions based on a lens
 */
-__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, PathSegment* pathSegments)
+__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth,
+    bool antialiasing, PathSegment* pathSegments)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -203,8 +204,8 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         segment.color = traceDepth > 0 ? glm::vec3(1.0f) : glm::vec3(0.0f);
         thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
         thrust::uniform_real_distribution<float> u01(0.0f, 1.0f);
-        const float sampleX = static_cast<float>(x) + u01(rng);
-        const float sampleY = static_cast<float>(y) + u01(rng);
+        const float sampleX = static_cast<float>(x) + (antialiasing ? u01(rng) : 0.5f);
+        const float sampleY = static_cast<float>(y) + (antialiasing ? u01(rng) : 0.5f);
 
         // One uniform subpixel sample per pixel per iteration.
         segment.ray.direction = glm::normalize(cam.view
@@ -224,8 +225,13 @@ __global__ void computeIntersections(
 {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths) return;
-    const Ray ray = pathSegments[idx].ray;
     ShadeableIntersection best{-1.0f, glm::vec3(0.0f), -1, glm::vec3(0.0f)};
+    if (pathSegments[idx].remainingBounces <= 0) {
+        // Sorting must receive a defined key even for completed paths.
+        intersections[idx] = best;
+        return;
+    }
+    const Ray ray = pathSegments[idx].ray;
     float closest = FLT_MAX;
     for (int i = 0; i < geoms_size; ++i) {
         glm::vec3 position(0.0f), normal(0.0f);
@@ -266,8 +272,6 @@ __global__ void shadeMaterial(
     const Material& material = materials[hit.materialId];
     const glm::vec3 emitted = material.emission.color * material.emission.emittance;
     if (emitted.x > 0.0f || emitted.y > 0.0f || emitted.z > 0.0f) {
-        // This path's throughput becomes its final radiance contribution.
-        // Check emission before bounce exhaustion, including the last query.
         path.color *= emitted;
         path.remainingBounces = 0;
         return;
@@ -295,7 +299,8 @@ __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iteration
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
  * of memory management
  */
-void pathtrace(uchar4* pbo, int frame, int iter)
+void pathtrace(uchar4* pbo, int frame, int iter,
+    std::vector<PathTraceBounce>* bounceCounts)
 {
     const int traceDepth = hst_scene->state.traceDepth;
     const Camera& cam = hst_scene->state.camera;
@@ -310,14 +315,23 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     // 1D block for path tracing
     const int blockSize1d = 128;
 
-    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, dev_paths);
+    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(
+        cam, iter, traceDepth, hst_scene->state.antialiasing, dev_paths);
     checkCUDAError("generate camera ray");
 
     int depth = 0;
     int num_paths = traceDepth > 0 ? pixelcount : 0;
+    if (bounceCounts) {
+        bounceCounts->clear();
+        bounceCounts->reserve(traceDepth + 1);
+        bounceCounts->push_back({0, num_paths, 0});
+    }
     if (guiData != nullptr) guiData->TracedDepth = 0;
 
-    while (num_paths > 0) {
+    // Without compaction, launch the whole buffer for a fixed depth budget.
+    // Dead paths keep their final contribution and are skipped by both kernels.
+    while (num_paths > 0 && depth < traceDepth) {
+        const int launchedPaths = num_paths;
         const int blocks = (num_paths + blockSize1d - 1) / blockSize1d;
         computeIntersections<<<blocks, blockSize1d>>>(
             depth, num_paths, dev_paths, dev_geoms,
@@ -338,10 +352,15 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         checkCUDAError("shade one bounce");
 
         
-        // better than remove_if
-        PathSegment* activeEnd = thrust::partition(thrust::device,
-            dev_paths, dev_paths + num_paths, IsActive{});
-        num_paths = static_cast<int>(activeEnd - dev_paths);
+        if (hst_scene->state.compactPaths) {
+            PathSegment* activeEnd = thrust::partition(thrust::device,
+                dev_paths, dev_paths + num_paths, IsActive{});
+            num_paths = static_cast<int>(activeEnd - dev_paths);
+        }
+        if (bounceCounts) {
+            bounceCounts->push_back({depth,
+                hst_scene->state.compactPaths ? num_paths : -1, launchedPaths});
+        }
         if (guiData != nullptr) guiData->TracedDepth = depth;
     }
 

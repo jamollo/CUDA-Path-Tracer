@@ -8,4 +8,10 @@ void InitDataContainer(GuiDataContainer* guiData);
 void pathtraceInit(Scene *scene, bool restoreAccumulation = false);
 void pathtraceFree();
 void pathtraceDisplay(uchar4 *pbo, int completedSamples);
-void pathtrace(uchar4 *pbo, int frame, int iteration);
+struct PathTraceBounce {
+    int bounce;
+    int activeAfter; // -1: not counted in uncompacted mode (no timed reduction).
+    int launchedPaths;
+};
+void pathtrace(uchar4 *pbo, int frame, int iteration,
+    std::vector<PathTraceBounce>* bounceCounts = nullptr);

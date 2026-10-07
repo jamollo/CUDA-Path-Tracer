@@ -156,5 +156,15 @@ if(PATH_TRACER_BUILD_TESTS)
 
     add_executable(scene_tests tests/scene_tests.cpp src/scene.cpp src/utilities.cpp)
     target_include_directories(scene_tests PRIVATE src ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    add_test(NAME transmission_scene COMMAND scene_tests "${CMAKE_CURRENT_SOURCE_DIR}/scenes/cornell.json")
+    add_test(NAME transmission_scene COMMAND scene_tests "${CMAKE_CURRENT_SOURCE_DIR}/scenes/cornell_glass.json")
+
+    # Compile tests against the same MSVC preprocessor behavior as the renderer.
+    if(MSVC)
+        foreach(validation_target checkpoint_tests glass_tests scene_tests)
+            target_compile_options(${validation_target} PRIVATE
+                "$<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>"
+                "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>"
+            )
+        endforeach()
+    endif()
 endif()

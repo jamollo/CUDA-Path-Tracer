@@ -145,6 +145,8 @@ struct RenderState
     unsigned int iterations;
     int traceDepth;
     bool sortMaterials = true;
+    bool compactPaths = true;
+    bool antialiasing = true;
     std::vector<glm::vec3> image;
     std::string imageName;
 };

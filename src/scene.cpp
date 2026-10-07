@@ -288,6 +288,9 @@ void Scene::loadFromJSON(const std::string& jsonName)
     const auto& cameraData = data["Camera"];
     RenderState& state = this->state;
     state.sortMaterials = data.value("sortMaterials", true);
+    // These flags remain in checkpointSceneIdentity, unlike sorting.
+    state.compactPaths = data.value("compactPaths", true);
+    state.antialiasing = data.value("antialiasing", true);
     Camera& camera = state.camera;
     camera.resolution.x = cameraData["RES"][0];
     camera.resolution.y = cameraData["RES"][1];
